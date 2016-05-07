@@ -1,0 +1,118 @@
+=====================================================================
+Attedees:
+Veena(Xilinx), Dave(Xilinx), Sam(Xilinx), Wendy(Xilinx),
+Etsam (Mentor), Arvind(Metnor),
+Henry (Wind River),
+Michal (NXP), Petr (NXP),
+Jonathan(Micrum)
+
+=====================================================================
+Notes:
+
+* OpenAMP 2016.04 is tagged
+
+* rpmsg/remoteproc kernel patchs mailing list: linux-remoteproc@vger.kernel.org
+
+============================
+OpenAMP MCA Working Group
+   * Review libmetal API next week. Arvin was speaking with Cyril on
+     libmetal topic.
+   * Lifecycle management problem; decouple IPC from life-cycle and
+     do from user space in a way that plays well with upstream infrastruture
+	 as well as introduce new capability Cyril and Arvind to talk again
+	 early next week and then present findings during next Thursday's
+	 OpenAMP MCA meeting.
+
+============================
+2016.10 Features Discussion
+
+==============
+RPMsg RTOS API
+   * Petr: used only on RTOS such as FreeRTOS, uC/OS, Nucleus. Not relevant
+     for Linux. remoteproc not used in RTOS to RTOS environment. 
+   * Arvind: libmetal should be unified API used across - RTOS-specific API
+     not aligned
+	 
+==============
+remoteproc and rpmsg - decoupling 
+   * Arvind: OA design could accomplish on RTOS side. But need to have
+     libmetal counterpart to support decoupling in Linux.
+     Reasonable goal to get half of the problem done for next release. 
+   * Michal/Petr NXP has decoupled rpmsg from remoterproc but use a light
+     platform driver module in Linux kernel. It gets information from DTS
+	 and implement low level virtio interface code may be available online
+	 with i.MX6
+   * Mentor has a similar driver in the openamp project
+    (system/linux/kernelspace/zynq_rpmsg_driver/zynq_rpmsg_driver.c),
+	 it needs to be upstreamed. The driver introduce new bindings for rpmsg.
+	 Mentor and NXP to work together and suggest the MCA could be working on
+	 standarsizing.
+
+==============
+Large rpmsg buffers
+   * Etsam: if application provides buffer larger than provided, use
+     descriptor chaining provided by virtio, change descriptor in vring so
+	 that more than one buffer can be consummed.
+
+==============
+Zero Copy
+   * essential for low footprint processor like cortex M
+     Work with BM/FreeRTOS and ready for review
+   * Arvind: use reserved field to flag (linux does not know but if somebody
+     wanted to use it would be a problem) may need to upstream to extend the
+	 current structure.
+
+==============
+Sysfs RPMsg_ept driver
+   * This driver will need to upstream
+
+==============
+RPMsg RTOS layer
+   * Petr: API not useable for BM, only non blocking can be used
+     Arvind: env could call rtos init instead of rpmsg_rtos_init
+     Arvind: it can be integrated into libmetal. The abstration
+	 portion for RTOS does not have to be the same as for Linux.
+   * There are rpmst_rtos zero copy APIs	 
+     Arvind: Solutions that would allow two RTOS to use zero copy feature,
+	 but Linux is not symmetric.  We need to have upstream comments. 
+	 
+     Petr: Could be ported to linux kernel part of the driver.
+	 NXP is not so concerned with Linux support as Xilinx/Mentor. But key
+	 point is that this is not required that both sides support zero copy API.
+	 Save copy from virtio buffer to applicaiton buffer. Linux (no zero copy)
+	 have to copy to virtio buffers. On rtos or bare-metal, virtio buffer is
+	 directly accessible.  
+
+==============
+Actions:
+
+* Wendy: send out release announcement
+
+* NXP and Xilnix will review Mentor's zynq_rpmsg_driver and provide comments.
+
+* Etsam/Arvind: Are you going to post the patch to mainstream?
+
+* Arvind will talk to Cyril on rpmsg size negotion feature
+
+* Arvind and Etsam will review Michal and Petr's Zero copy and RPMSG RTOS overlay patches
+  and provide comments on the mailing list.
+ 
+* Petr will post the sysfs rpmsg_ept driver to linux-remoteproc@vger.kernel.org
+
+* Provide proposals and post them to open-amp@googlegroups.com by May 20th:
+  * libmetal: Xilinx
+  * Userspace rpmsg/remoteproc: Xilinx
+  * large rpmsg buffers proposal: Mentor
+  * remoteproc/rpmsg decoupling and Linux remote: Mentor
+
+==============
+2016.10 Schedule (Doesn't have time to talk about it in the meeting)
+* 2016-05-20: Features proposal freeze
+   * Please post the feature proposal by the end of this date
+
+* 2016-06-17: Features Freeze
+   * Finalize the features list of 2016.10
+   * there can be meetings for specific features proposals before the
+     features freeze date if needed.
+
+ 
