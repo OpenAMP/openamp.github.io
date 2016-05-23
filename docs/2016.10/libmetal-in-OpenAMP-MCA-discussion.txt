@@ -1,0 +1,33 @@
+# OpenAMP MCA Working Group Meeting -- libmetal in OpenAMP 2016-05-19
+
+## libmetal overview
+
+### Motivation
+
+* Remove OS/Compiler specific details form OpenAMP repo
+* Implement OpenAMP libraries in Linux user space
+  * Implement the full rpmsg/virtio in Linux user space
+  * Remain backwards compatible with Linux kernel implementation
+* Users can use libemtal APIs to build their specialized AMP solution
+
+### libmetal APIs Overview
+* APIs provided by libmetal are put into the README of libmetal repo
+
+
+## Concerns on libmetal
+* Petr: footprint size and complexity for RTOS
+  * Cyril: libmetal is very thin, it should not increase the size of the code in RTOS
+* Petr: Since it out of the OpenAMP repo,
+  the complexity and size may increase as more support is added to libmetal
+  * Cyril: It is under OpenAMP opensource project.
+           It is mainly for OpenAMP.
+           We do not force other software stack to use libmetal.
+           We move the env layer in the OpenAMP to libmetal, and provides an option to user.
+
+## Next
+* Continue to complete APIs in libmetal for RTOS/bare-metal
+* Continue to port OpenAMP on libmetal
+
+## Misc
+* Petr and Marek: rpmsg protocol was out sufficiently defined outside of the actual implementation.
+  Propose to discuss the protocol.
