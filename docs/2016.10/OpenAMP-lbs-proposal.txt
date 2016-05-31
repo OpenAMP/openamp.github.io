@@ -1,0 +1,225 @@
+Open AMP Large Buffer Support(LBS) - Design Proposal
+
+1. Problem Statement
+
+OpenAMP applications transmit data using rpmsg_send* APIs. These APIs validate the parameters and copy the data from the application buffer to available shared memory buffer. The shared buffer is then enqueued on virtqueue followed by a notification. If the data size is greater than the internal buffer size, defined by RPMSG_BUFFER_SIZE macro (precisely, it is RPMSG_BUFFER_SIZE - sizeof(struct rpmsg_hdr)), an error is returned. In such scenario, it is the responsibility of the application to break down the buffer into small segments and transmit each segment using rpmsg_send* API. This implies that a notification will be triggered for each enqueued segment. A number of notifications to transfer single application buffer negatively impacts the performance. It is possible to split the user provided buffer into small segments, each of size equal to an internal buffer and link them using the virtqueue chaining feature, within the RPMsg stack. The resulting chain of buffers can be transferred in the context of single notification. This will improve the performance and also, moves the burden of splitting the buffer into RPMsg stack.
+ 
+2. Solution
+
+Following are the possible solutions to this problem;
+
+    a. Increase the internal buffer size (RPMSG_BUFFER_SIZE). This is a trivial solution, but not scalable because the input buffer size will vary depending on the application requirements.
+    
+    b. Leverage the virtqueue chaining feature to transfer application data greater than the internal buffer size. The design of LBS using this approach is discussed in the next sections.
+ 
+In practical situations, the user can change the internal buffer size along with the chaining support to optimize the performance.
+
+3. LBS is a feature enhancement with a focus on performance improvement.
+
+4. Design
+
+This section discusses the modifications and additions required in the existing implementation to enable LBS.
+
+4a. TX Path
+
+The "rpmsg_send_offchannel_raw" API will be updated to incorporate handling of large application buffer. The following changes are required:
+
+    a. Calculate the number of shared memory buffers required for given application data size.
+
+    b. Create a linked list (struct llist) to hold shared memory buffers. The linked list is required because "virtqueue_add_buffer" API, used by the master to place buffer on virtqueue accepts linked list of buffers.
+    On the remote side, "virtqueue_add_consumed_buffer" API is used and currently, this API only takes single buffer. This API will be updated or we may add new API to handle buffer list. Each node in the linked list will hold the buffer pointer, its index, and size. The buffer index is used on remote side to place the buffer on virtqueue.
+    Please note that the "rpmsg_send_offchannel_raw" does not directly invoke virtqueue APIs and instead uses the wrapper function "rpmsg_enqueue_buffer". The wrapper function will need few adjustments, but since it is an internal function so does not affect the application interface.
+
+    c. Try to obtain the required number of shared buffers from the virtqueue and/or shared memory pool. If buffers are not available then wait or return error depending on the "wait" argument. The "get_tx_buffer" function will be invoked multiple times to fetch the shared memory buffers. Save buffers info in the linked list created in step 'b'.
+
+    d. Copy the application data into shared memory buffers, obtained in the last step.
+
+    e. Enqueue shared buffers using "virtqueue_add_buffer/virtqueue_add_consumed_buffer" function.
+
+    f. Trigger the notification, "virtqueue_kick".
+        
+The RPMSG Tx APIs signatures are preserved and hence maintain backward compatibility, however, the internal implementation will changed significantly. Minor change/addition is required in virtqueue APIs for remote side only. 
+    
+4b. Rx Path
+
+Following modifications are required in Rx path to support large buffer handling;
+
+    a. Inside the Rx callback "rpmsg_rx_callback", get the size of the received data from the rpmsg header (struct rpmsg_hdr). Create a linked list(struct llist) based on the size to hold incoming buffers. Each node node in the linked list will maintain information (handle, size and index) of a single buffer.
+
+    b. Management control block will be used to encapsulate the linked list and other metadata related to received buffers. This structure will be provided to the application for processing the buffers. The application will use this control block as an argument in utility function ("rpmsg_get_data", discussed in point 'd') to obtain the received buffers. The proposed implementation of this structure is provided next;
+
+    struct rpmsg_buffer
+    {
+        struct llist             *buf_list;       /* List of SHM buffers. */
+        struct llist             *curr_node;      /* Current node in the buffers list. */
+        unsigned int             data_size;       /* Total amount of data in buf_list. */
+        unsigned int             buffer_count;    /* No of SHM buffers in buf_list. */
+        unsigned int             buffer_size;     /* Max data capacity of each buffer. */
+        unsigned int             flags;           /* Used for zero copy buffer */
+        struct rpmsg_channel     *rp_chnl;        /* Buffer belongs to channel. */
+    };
+
+    The usage of this control block in explained in the point 'd'.
+
+    c. Retrieve the buffer chain from the virtqueue. A new API is required in the virtqueue code to pull out the chained buffers and save them in the linked list. This API will make use of "flags" and "next" fields of "vring_desc" structure to get chained buffers.
+
+    d. Provide received buffers to the application.
+       A couple of options is available to pass the received buffers to the application: 
+
+        i. Pass the "rpmsg_buffer" created in the second step, as an argument in the callback function instead of "data" pointer. The callback implementation will invoke "rpmsg_get_data" function with "rpmsg_buffer" argument to get the buffers. The example callback implementation with this approach is given next;
+
+        void rpmsg_read_cb(struct rpmsg_channel *rp_chnl, void *data, int len, void * priv,
+                unsigned long src)
+        {
+            unsigned int *data_ptr;
+            unsigned int offset = 0;
+            unsigned int data_len = 0;
+            struct rpmsg_buffer *rxb = (struct rpmsg_buffer *)data;
+            do
+            {
+                data_ptr = rpmsg_get_data(rxb, &data_len); /* Obtain received buffers */
+
+                if (data_ptr)
+                {
+                    memcpy((char *) user_buff + offset, data_ptr, data_len); /* copy data to user buffer */
+                    offset += data_len;
+                }
+            } while (data_ptr);
+
+        The drawback of this approach is that the existing applications will not work since they expect buffer pointer in the callback parameter.
+        
+        ii. Use the reserved field in "rpmsg_hdr" object to hold the "rpmsg_buffer" pointer just like it is being used in the NXP zero-copy implementation. The "struct rpmsg_hdr_reserved" will be replaced by the "struct rpmsg_buffer".
+        This is the better approach because it maintains backwards compatibility and conforms to NXP zero copy proposal. The example callback implementation is given next;
+        
+        void rpmsg_read_cb(struct rpmsg_channel *rp_chnl, void *data, int len, void * priv,
+                unsigned long src)
+        {
+            struct rpmsg_buffer *rxb;
+            unsigned int *data_ptr;
+            unsigned int offset = 0;
+            unsigned int data_len = 0;
+
+            struct rpmsg_hdr *hdr = RPMSG_HDR_FROM_BUF(data);
+            rxb = (struct rpmsg_buffer *)hdr->reserved; 
+
+            do
+            {
+                data_ptr = rpmsg_get_data(rxb, &data_len); /* New API */
+
+                if (data_ptr)
+                {
+                    memcpy((char *) user_buff + offset, data_ptr, data_len); /* Copy data to user buffer */.
+                    offset += data_len;
+                }
+            } while (data_ptr);
+
+        }
+
+    e. When the callback is returned, get the buffers from the linked list present in "rpmsg_buffer" and put them in the used/available list of virtqueues.
+
+4c. Application
+
+Based on suggested changes in Tx and Rx paths, following updates will be required in application;
+
+    a. Rx callback handling will be modified to process buffers chain. The required changes are discussed in section 4.b, point 'd'.
+    b. The code to transmit the data will stay intact.
+
+4.d New APIs
+
+    a. New API "rpmsg_get_data" will be added in RPMsg stack to process the large buffer in Rx path.
+    This API will provide a data pointer to buffers encapsulated in rpmsg_buffer. On iterative call to this function for "rpmsg_buffer", it returns data pointer to next available buffer. The API prototype is given below;
+
+    void *rpmsg_get_dataptr(struct rpmsg_buffer *rpm_buffer, unsigned int *len)
+
+    b. Strictly speaking, VirtIO APIs are not directly exposed to OpenAMP applications and hence any changes made to them will not affect the applications design. However, VirtIO is an  independent module therefore its change set is discussed explicitly. Following APIs will be required in VirtIO code to handle buffer chain. 
+
+        i. Provides the index of available buffer without actually modifying the index.
+        uint16_t virtqueue_get_buffer_idx(struct virtqueue *vq)
+
+        ii. Provides number free descriptors available in the virtqueue.
+        int virtqueue_navail(struct virtqueue *vq) 
+
+        iii. Retrieves buffer chain from the virtqueue and saves it in the given linked list.
+        uint32_t virtqueue_get_bufchain(struct virtqueue *vq, struct llist *head, uint16_t idx)
+
+        iv. Enqueue buffer list on virtqueue. Used by remote side only.
+        int virtqueue_add_consumed_buffer(struct virtqueue *vq, struct llist *buffer,
+                                            uint_t len)
+5. Effect on Zero Copy
+
+This feature will influence the zero copy design proposed by the NXP. With LBS support in place, applications can use zero copy APIs to request buffer size greater than internal buffer size and so current zero-copy implementation will be extended to get & return multiple buffers. Moreover, the zero copy buffer release API will be updated to return chained buffers back to RPMsg stack. In a nutshell, the zero copy implementation will need modifications to support large buffers. Following changes are required in the zero copy APIs to handle the LBS:
+
+    a. void *rpmsg_alloc_tx_buffer(struct rpmsg_channel *rpdev, unsigned long *size, int wait)
+
+    This API will be extended to get buffers from the virtqueue and/or shared memory pool. The API will be amended to return the "rpmsg_buffer" control block. Internal implementation will be updated to retrieve the multiple buffers from the virtqueues and encapsulate them in the "rpmsg_buffer" object.
+
+    b. int rpmsg_send_offchannel_nocopy(struct rpmsg_channel *rpdev, unsigned long src, unsigned long   dst, void *txbuf, int len)
+
+    This API will accept the "rpmsg_buffer" control block instead of Tx buffer itself. The internal implementation will be updated to get the zero copy buffers from the list and enqueue them on virtqueue. The changes will be similar to Tx Path, described in section 4.a.
+
+    The use of aforementioned APIs with LBS is given below;
+
+    {
+        struct rpmsg_buffer *zctx_buffer;
+        unsigned int zc_buff_size;
+        void *zc_buff;
+        int size = ZC_BUFFER_SIZE;
+
+        zctx_buffer = rpmsg_alloc_tx_buffer(rp_chnl, size);
+        if (zctx_buffer)
+        {
+
+            while (size)
+            {
+                /* Traverse the buffer list */
+                zc_buff = rpmsg_get_dataptr(&zctx_buffer, &zc_buff_size);
+                /* Write some arbitrary data */
+                memset(zc_buff, 0xa5,zc_buff_size);
+                size -= zc_buff_size;
+            }
+
+            /* Send buffer back to other side using zero copy APIs */
+            rpmsg_send_offchannel_nocopy(rp_chnl, rp_chnl->src, rp_chnl->dst, zctx_buffer, ZC_BUFFER_SIZE);
+        }
+    }
+
+    c. void rpmsg_release_rx_buffer(struct rpmsg_channel *rpdev, void *rxbuf)
+
+    This API will take "rpmsg_buffer" as an argument instead of received buffer. The rpmsg_buffer will contain the buffer handle and index, used to return the buffers.
+
+    d. void rpmsg_hold_rx_buffer(struct rpmsg_channel *rpdev, void *rxbuf)
+
+    This API will accept the "rpmsg_buffer" as input argument instead of received buffer. A flag will be set in the "flags" field of "rpmsg_buffer" to prevent the stack from reclaiming the buffer once callback has returned.
+
+    The pseudo code for Rx path with LBS is given below;
+
+        struct rpmsg_buffer rxb;
+        .
+        .
+        .
+        void rpmsg_read_cb(struct rpmsg_channel *rp_chnl, VOID *data, int len, VOID * priv,
+                unsigned long src)
+        {
+
+            unsigned int *data_ptr;
+            unsigned int offset = 0;
+            unsigned int data_len = 0;
+
+            struct rpmsg_hdr *hdr = RPMSG_HDR_FROM_BUF(data);// new API
+            rxb = (struct rpmsg_buffer *)hdr->reserved;
+            rpmsg_hold_rx_buffer(rxb)
+            
+        }
+        .
+        .
+        .
+        .
+        rpmsg_release_rx_buffer(rxb);
+
+6. Effect on Linux
+
+The LBS can only work if enabled on both master and remote sides. Inadvertent errors will occur if only one side is using LBS. The current proposal does not discuss changes required on Linux side and only considers software environments using the OpenAMP.
+
+7. Performance
+
+Based on prototype implementation, for application buffer of size 2048 bytes and internal buffer of size 512 bytes, approximately 30% performance gain is achieved. However, the performance gain will vary depending on the size of the application and internal buffer. The performance gain will increase with an increase in the size of application buffer for fixed internal buffer size. Conversely, the gain will reduce for application buffer size approaching the internal buffer size.
